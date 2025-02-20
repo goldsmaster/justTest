@@ -295,9 +295,12 @@ class SimplifiedYOLOv1Loss(nn.Module):
 
                         # 计算尺度损失
                         # 计算选中预测框的宽高平方根与真实宽高平方根的均方误差，并乘以坐标损失权重，累加到尺度损失中
+                        # 确保输入值非负
+                        pre_w_h = torch.clamp(y_pre[bid, grid_i, grid_j, (5 * choose_bbox + 2):(5 * choose_bbox + 4)], min=eps)
+                        true_w_h = torch.clamp(y_true[bid, grid_i, grid_j, 2:4], min=eps)
                         loss_scale += self.lambda_coord * torch.pow(
-                            torch.sqrt(y_pre[bid, grid_i, grid_j, (5 * choose_bbox + 2):(5 * choose_bbox + 4)] + eps) -
-                            torch.sqrt(y_true[bid, grid_i, grid_j, 2:4] + eps), 2
+                            torch.sqrt(pre_w_h) -
+                            torch.sqrt(true_w_h), 2
                         ).sum()
                     else:
                         # 该网格没有物体
@@ -439,8 +442,7 @@ class YOLOv1(nn.Module):
         self.fc_layers = nn.Sequential(
             nn.Linear(256 * 14 * 14, 1024),
             nn.LeakyReLU(0.1),
-            nn.Linear(1024, S * S * (5 * B + C)),
-            nn.ReLU()
+            nn.Linear(1024, S * S * (5 * B + C))
         )
 
     def forward(self, x):
