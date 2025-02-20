@@ -209,9 +209,60 @@ def iou(bbox_pre, bbox_true, grid_i, grid_j, img_size=448, grid_num=7):
     return res
 
 
+
+# 只计算中心坐标损失的简化损失函数
+class CenterRegressionLoss(nn.Module):
+    def __init__(self, device, grid_num=7, img_size=448, lambda_coord=2):
+        super(CenterRegressionLoss, self).__init__()
+        self.device = device
+        self.grid_num = grid_num
+        self.img_size = img_size
+        self.lambda_coord = lambda_coord
+
+    def forward(self, y_pre, y_true):
+        eps = 1e-12
+        loss_coordinate = torch.tensor([0], dtype=torch.float32).to(self.device)
+        batch_size = y_pre.shape[0]
+
+        for bid in range(batch_size):
+            for grid_i in range(self.grid_num):
+                for grid_j in range(self.grid_num):
+                    if y_true[bid, grid_i, grid_j, 4] == 1.0:
+                        # 选择 IOU 较大的预测框
+                        confidence_true = []
+                        confidence_true.append(iou(
+                            y_pre[bid, grid_i, grid_j, 0:4],
+                            y_true[bid, grid_i, grid_j, 0:4],
+                            grid_i=grid_i,
+                            grid_j=grid_j,
+                            img_size=self.img_size,
+                            grid_num=self.grid_num
+                        ))
+                        confidence_true.append(iou(
+                            y_pre[bid, grid_i, grid_j, 5:9],
+                            y_true[bid, grid_i, grid_j, 0:4],
+                            grid_i=grid_i,
+                            grid_j=grid_j,
+                            img_size=self.img_size,
+                            grid_num=self.grid_num
+                        ))
+                        if confidence_true[0] > confidence_true[1]:
+                            choose_bbox = 0
+                        else:
+                            choose_bbox = 1
+
+                        # 计算中心坐标损失
+                        loss_coordinate += self.lambda_coord * torch.pow(
+                            y_pre[bid, grid_i, grid_j, (5 * choose_bbox):(5 * choose_bbox + 2)] -
+                            y_true[bid, grid_i, grid_j, 0:2], 2
+                        ).sum()
+
+        loss_coordinate /= batch_size
+        return loss_coordinate
+
 # 定义简化后的 YOLOv1 损失函数类，继承自 nn.Module
 class SimplifiedYOLOv1Loss(nn.Module):
-    def __init__(self, device, grid_num=7, img_size=448, lambda_coord=5, lambda_noobj=0.1):
+    def __init__(self, device, grid_num=7, img_size=448, lambda_coord=2, lambda_noobj=0.1):
         # 调用父类的构造函数
         super(SimplifiedYOLOv1Loss, self).__init__()
         # 设备，用于指定计算是在 CPU 还是 GPU 上进行
@@ -494,13 +545,16 @@ def test_model(model, img):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
+    
     img = img.resize((448, 448))
     img = np.array(img) / 255.0
     img = torch.from_numpy(img).permute(2, 0, 1).float().unsqueeze(0).to(device)
+    
     with torch.no_grad():
         output = model(img)
 
-    show_output(img,output)
+    #show_output(img,output)
+    show_center_output(img,output)
 
 def show_output(img,output):
     S = 7
@@ -530,6 +584,36 @@ def show_output(img,output):
                     ax.add_patch(rect)
     plt.show()
 
+def show_center_output(img, output):
+    S = 7
+    B = 2
+    C = 1
+    output = output.cpu().squeeze(0)
+    fig, ax = plt.subplots(1)
+    ax.imshow(img.cpu().squeeze(0).permute(1, 2, 0))
+
+    # 手动设置坐标轴范围
+    ax.set_xlim(0, 448)
+    ax.set_ylim(448, 0)  # 注意：matplotlib 的 y 轴方向是从上到下，所以这里是 448 到 0
+
+    for i in range(S):
+        for j in range(S):
+            if output[i, j].shape[0] == 5:
+                B = 1
+            for b in range(B):
+                conf = output[i, j, 4 + b * 5].item()
+                if conf > 0.05:
+                    cx_cell = output[i, j, b * 5 + 0].item()
+                    cy_cell = output[i, j, b * 5 + 1].item()
+                    cx = (j + cx_cell) / S
+                    cy = (i + cy_cell) / S
+                    x = cx * 448
+                    y = cy * 448
+                    # 绘制中心点
+                    ax.scatter(x, y, s=conf * 100, c='r')
+    plt.show()
+
+
 # 主函数
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -546,19 +630,20 @@ if __name__ == "__main__":
     #test_loss()
     
     # 数据集和数据加载器
-    dataset = NumberDataset(num_samples=300)
-    dataloader = DataLoader(dataset, batch_size=30, shuffle=True)
+    dataset = NumberDataset(num_samples=200)
+    dataloader = DataLoader(dataset, batch_size=20, shuffle=True)
 
+    #show_center_output(dataset[0][0],dataset[0][1])
     #show_output(dataset[0][0],dataset[0][1])
     #exit()
 
     # 模型、损失函数和优化器
     model = YOLOv1()
-    criterion = SimplifiedYOLOv1Loss(device)
+    criterion = CenterRegressionLoss(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # 训练模型
-    train_model(model, dataloader, criterion, optimizer, num_epochs=100)
+    train_model(model, dataloader, criterion, optimizer, num_epochs=200)
 
     # 测试模型
     test_img, _ = write_numbers_on_background()
